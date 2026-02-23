@@ -5,7 +5,6 @@ import chalk from 'chalk';
 import { format as dateFnsFormat } from 'date-fns';
 import { config } from '../config';
 
-
 const { combine, timestamp, printf, errors, json } = format;
 
 const LOG_DIR = 'logs';
