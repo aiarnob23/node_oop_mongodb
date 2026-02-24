@@ -5,19 +5,29 @@ import { requestId } from '../middlewares/requestId';
 import helmet from 'helmet';
 import { config } from './config';
 import cors from 'cors';
+import { AppError, RateLimitError, TimeoutError } from './errors/AppError';
+import { requestLogger } from '../middlewares/requestLogger';
+import rateLimit from 'express-rate-limit';
+import { HTTPStatusCode } from '../types/HTTPStatusCode';
+import mongoose from 'mongoose';
+import { asyncHandler } from '../middlewares/asyncHandler';
+import { AppLogger } from './logging/logger';
+import type { IgnitorModule } from './IgnitorModule';
 
 
 export class IgnitorApp {
     private app: Express;
     private context: Context;
+    private modules: IgnitorModule[] = [];
 
     constructor() {
         this.app = express();
         this.context = new Context();
+        this.initializeCore();
     }
 
     //initialize core
-    private initialize(): void {
+    private initializeCore(): void {
         // Trust proxy (important for rate limiting and IP detection)
         this.app.set('trust proxy', 1);
 
@@ -76,7 +86,8 @@ export class IgnitorApp {
             })
         );
 
-          this.app.use((req: Request, res: Response, next: NextFunction) => {
+        // Request timeout middleware
+        this.app.use((req: Request, res: Response, next: NextFunction) => {
             const timeout = setTimeout(() => {
                 if (!res.headersSent) {
                     next(new TimeoutError('Request timeout'));
@@ -88,5 +99,97 @@ export class IgnitorApp {
 
             next();
         });
+
+        // Request logging
+        this.app.use(requestLogger());
+
+        // Rate limiting
+        if (config.server.isProduction) {
+            this.app.use(
+                rateLimit({
+                    windowMs: config.security.rateLimit.windowMs,
+                    max: config.security.rateLimit.max,
+                    standardHeaders: true,
+                    legacyHeaders: false,
+                    handler: (req: Request, res: Response, next: NextFunction) => {
+                        next(new RateLimitError());
+                    },
+                    skip: req => {
+                        // Skip rate limiting for health check
+                        return req.path === '/health';
+                    },
+                })
+            );
+        }
+
+        // Health check endpoint
+        this.app.get(
+            '/health',
+            asyncHandler(async (req: Request, res: Response) => {
+                try {
+                    // Check database connection
+                    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+                        throw new Error('Database not connected');
+                    }
+
+                    await mongoose.connection.db.admin().ping();
+
+                    // Uptime conversion function
+                    const formatUptime = (seconds: number) => {
+                        const days = Math.floor(seconds / (3600 * 24));
+                        seconds %= 3600 * 24;
+                        const hours = Math.floor(seconds / 3600);
+                        seconds %= 3600;
+                        const minutes = Math.floor(seconds / 60);
+                        seconds = Math.floor(seconds % 60);
+                        return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+                    };
+
+                    // Memory formatting
+                    const formatMemory = (bytes: number) =>
+                        `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+
+                    // CPU usage formatting
+                    const formatCPU = (cpuUsage: NodeJS.CpuUsage) =>
+                        `User: ${(cpuUsage.user / 1000).toFixed(2)}ms, System: ${(
+                            cpuUsage.system / 1000
+                        ).toFixed(2)}ms`;
+
+                    const uptimeSeconds = process.uptime();
+                    const healthData = {
+                        status: 'healthy',
+                        timestamp: new Date().toISOString(),
+                        uptime: formatUptime(uptimeSeconds),
+                        environment: config.server.env,
+                        version: process.env.npm_package_version || '1.0.0',
+                        memoryUsage: {
+                            rss: formatMemory(process.memoryUsage().rss),
+                            heapTotal: formatMemory(process.memoryUsage().heapTotal),
+                            heapUsed: formatMemory(process.memoryUsage().heapUsed),
+                            external: formatMemory(process.memoryUsage().external),
+                            arrayBuffers: formatMemory(process.memoryUsage().arrayBuffers),
+                        },
+                        cpuUsage: formatCPU(process.cpuUsage()),
+                    };
+
+                    res.status(200).json(healthData);
+                } catch (error) {
+                    throw new AppError(
+                        HTTPStatusCode.SERVICE_UNAVAILABLE,
+                        'Service unhealthy',
+                        'SERVICE_UNAVAILABLE',
+                        { reason: 'Database connection failed' }
+                    );
+                }
+            })
+        );
+
+
+    }
+
+    // Register a module
+    public registerModule(module: IgnitorModule): void {
+        this.modules.push(module);
+        AppLogger.info(`🧩 Registered module: ${module.name}`);
     }
 }
