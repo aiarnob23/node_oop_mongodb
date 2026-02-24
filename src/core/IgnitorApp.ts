@@ -13,6 +13,9 @@ import mongoose from 'mongoose';
 import { asyncHandler } from '../middlewares/asyncHandler';
 import { AppLogger } from './logging/logger';
 import type { IgnitorModule } from './IgnitorModule';
+import { BaseModule } from './BaseModule';
+import { notFoundHandler } from '../middlewares/notFound';
+import { errorHandler } from './errors/errorHandler';
 
 
 export class IgnitorApp {
@@ -191,5 +194,206 @@ export class IgnitorApp {
     public registerModule(module: IgnitorModule): void {
         this.modules.push(module);
         AppLogger.info(`🧩 Registered module: ${module.name}`);
+    }
+
+    // Register routes from all modules
+    private async registerModuleRoutes(): Promise<void> {
+        // Register routes from all modules
+        for (const module of this.modules) {
+            if (module instanceof BaseModule) {
+                const moduleRouter = module.getRouter();
+                this.app.use('/', moduleRouter);
+                AppLogger.info(`🛣️ Registered routes for module: ${module.name}`);
+            }
+        }
+    }
+
+    // Sort modules by dependencies
+    private sortModulesByDependencies(): IgnitorModule[] {
+        const sorted: IgnitorModule[] = [];
+        const visited: Set<string> = new Set();
+        const temp: Set<string> = new Set();
+
+        const visit = (module: IgnitorModule) => {
+            if (temp.has(module.name)) {
+                throw new AppError(
+                    HTTPStatusCode.INTERNAL_SERVER_ERROR,
+                    `Circular dependency detected: ${module.name}`,
+                    'CIRCULAR_DEPENDENCY'
+                );
+            }
+
+            if (!visited.has(module.name)) {
+                temp.add(module.name);
+
+                if (module.dependencies) {
+                    module.dependencies.forEach(depName => {
+                        const dep = this.modules.find(m => m.name === depName);
+                        if (!dep) {
+                            throw new AppError(
+                                HTTPStatusCode.INTERNAL_SERVER_ERROR,
+                                `Dependency ${depName} not found for module ${module.name}`,
+                                'MISSING_DEPENDENCY'
+                            );
+                        }
+                        visit(dep);
+                    });
+                }
+
+                temp.delete(module.name);
+                visited.add(module.name);
+                sorted.push(module);
+            }
+        };
+
+        this.modules.forEach(visit);
+        return sorted;
+    }
+
+    // Initialize modules
+    public async initializeModules(): Promise<void> {
+        const sortedModules = this.sortModulesByDependencies();
+
+        for (const module of sortedModules) {
+            try {
+                AppLogger.info(`🔧 Initializing module: ${module.name}`);
+                await module.initialize(this.context);
+                AppLogger.info(`✅ Module ${module.name} initialized successfully`);
+            } catch (error) {
+                const appError = new AppError(
+                    HTTPStatusCode.INTERNAL_SERVER_ERROR,
+                    `Failed to initialize module ${module.name}`,
+                    'MODULE_INITIALIZATION_ERROR',
+                    {
+                        module: module.name,
+                        originalError: error instanceof Error ? error.message : String(error),
+                    }
+                );
+
+                AppLogger.error(`❌ ${appError.message}`, {
+                    error: appError,
+                    context: 'module-initialization',
+                });
+
+                throw appError;
+            }
+        }
+    }
+
+
+    // Start the server
+    public async spark(port: number): Promise<void> {
+        try {
+            AppLogger.info('✅ Configuration loaded successfully');
+
+            AppLogger.info('🔧 Initializing context...');
+            await this.context.initialize();
+
+            AppLogger.info('🔧 Initializing modules...');
+            await this.initializeModules();
+
+            AppLogger.info('🛣️ Registering module routes...');
+            await this.registerModuleRoutes();
+
+            // 404 handler (must be after all routes but before error handler)
+            this.app.use(notFoundHandler());
+
+            // Global error handler (must be last)
+            this.app.use(errorHandler());
+
+            AppLogger.info('🚀 Starting server...');
+            const server = this.app.listen(port, () => {
+                AppLogger.info(
+                    `⚡️ Ignitor Server running on port ${port} in ${config.server.env} mode`
+                );
+            });
+
+            // Handle server errors
+            server.on('error', (err: NodeJS.ErrnoException) => {
+                if (err.code === 'EADDRINUSE') {
+                    throw new AppError(
+                        HTTPStatusCode.INTERNAL_SERVER_ERROR,
+                        `Port ${port} is already in use`,
+                        'PORT_IN_USE'
+                    );
+                }
+                throw err;
+            });
+
+            // Graceful shutdown handling
+            const shutdownSignals = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
+            shutdownSignals.forEach(signal => {
+                process.on(signal, async () => {
+                    AppLogger.info(`🛑 Received ${signal}, starting graceful shutdown...`);
+
+                    server.close(async () => {
+                        try {
+                            await this.shutdown();
+                            process.exit(0);
+                        } catch (error) {
+                            AppLogger.error('❌ Error during shutdown:', { error });
+                            process.exit(1);
+                        }
+                    });
+
+                    setTimeout(() => {
+                        AppLogger.error('⚠️ Forced shutdown due to timeout');
+                        process.exit(1);
+                    }, 30000);
+                });
+            });
+
+            AppLogger.info('✅ Server setup complete');
+        } catch (error) {
+            AppLogger.error('❌ Failed to start server:', {
+                error: error instanceof Error ? error : new Error(String(error)),
+                context: 'server-start',
+            });
+            throw error;
+        }
+    }
+
+    // Get the Express app
+    public getApp(): Express {
+        return this.app;
+    }
+
+    // Get the application context
+    public getContext(): Context {
+        return this.context;
+    }
+
+    // Get the configured CORS origins
+    private getConfiguredOrigins(): string[] | string {
+        return config.server.isProduction && config.security.cors.allowedOrigins.length > 0
+            ? config.security.cors.allowedOrigins
+            : '*';
+    }
+
+    // Shutdown the application
+    public async shutdown(): Promise<void> {
+        AppLogger.info('🛠️ Shutting down application...');
+
+        // Shutdown modules in reverse order
+        for (let i = this.modules.length - 1; i >= 0; i--) {
+            const module = this.modules[i];
+            if (!module) continue;
+            if (module.onShutdown) {
+                try {
+                    AppLogger.info(`🧩 Shutting down module: ${module.name}`);
+                    await module.onShutdown();
+                } catch (error) {
+                    AppLogger.error(`❌ Error shutting down module ${module.name}`, {
+                        error: error instanceof Error ? error : new Error(String(error)),
+                        module: module.name,
+                        context: 'module-shutdown',
+                    });
+                }
+            }
+        }
+
+        // Shutdown context
+        await this.context.shutdown();
+        AppLogger.info('✅ Application shutdown complete');
     }
 }
