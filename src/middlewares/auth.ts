@@ -1,5 +1,5 @@
 
-import type { NextFunction, Request } from "express";
+import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { config } from "../core/config";
 import { AuthenticationError, AuthorizationError } from "../core/errors/AppError";
@@ -16,11 +16,6 @@ export interface JWTPayload {
     exp?: number;
 }
 
-export interface RequestWithUser extends Request {
-    user?: JWTPayload;
-    userId?: string;
-    userRole?: string;
-}
 
 /**
  * Extract token from Authorization header or cookies
@@ -72,7 +67,7 @@ function verifyToken(token: string): JWTPayload {
 /**
  * Middleware to authenticate JWT token
  */
-export const authenticate = (req: RequestWithUser, res: Response, next: NextFunction) => {
+export const authenticate = (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = extractToken(req);
         if (!token) {
@@ -104,7 +99,7 @@ export const authenticate = (req: RequestWithUser, res: Response, next: NextFunc
  * Middleware to check if user has required role
  */
 export const authorize = (...roles: string[]) => {
-    return (req: RequestWithUser, res: Response, next: NextFunction) => {
+    return (req: Request, res: Response, next: NextFunction) => {
         if (!req.userRole) {
             throw new AuthenticationError('User not authenticated');
         }
@@ -132,7 +127,7 @@ export const authorize = (...roles: string[]) => {
  * Middleware to check if user can access their own resource or is admin
  */
 export const authorizeOwnerOrAdmin = (userIdParam: string = 'id') => {
-    return (req: RequestWithUser, res: Response, next: NextFunction) => {
+    return (req: Request, res: Response, next: NextFunction) => {
         if (!req.userId) {
             throw new AuthenticationError('User not authenticated');
         }
@@ -162,7 +157,7 @@ export const authorizeOwnerOrAdmin = (userIdParam: string = 'id') => {
 /**
  * Optional authentication - does not throw error if no/invalid token
  */
-export const optionalAuth = (req: RequestWithUser, res: Response, next: NextFunction) => {
+export const optionalAuth = (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = extractToken(req);
         if (!token) {
