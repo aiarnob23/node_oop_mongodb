@@ -117,7 +117,7 @@ export abstract class BaseService<TSchema> {
 
     // ---------------- UPDATE BY ID ----------------
     protected async updateById(
-        id: mongoose.Types.ObjectId,
+        id: mongoose.Types.ObjectId | string,
         data: mongoose.UpdateQuery<TSchema>
     ): Promise<TSchema> {
         try {

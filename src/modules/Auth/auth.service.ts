@@ -372,7 +372,7 @@ export class AuthService extends BaseService<IUser> {
      * Change user password (when logged in)
      */
     async changePassword(
-        userId: mongoose.Types.ObjectId,
+        userId: mongoose.Types.ObjectId | string,
         currentPassword: string,
         newPassword: string
     ): Promise<{ message: string }> {
@@ -406,7 +406,7 @@ export class AuthService extends BaseService<IUser> {
     /**
      * Get user profile by token
      */
-    async getProfile(userId: mongoose.Types.ObjectId): Promise<Omit<IUser, 'password'>> {
+    async getProfile(userId: mongoose.Types.ObjectId | string): Promise<Omit<IUser, 'password'>> {
         const user = await this.findById(userId);
         if (!user) {
             throw new NotFoundError('User');
