@@ -25,6 +25,8 @@ export interface IUser {
     emailVerifiedAt?: Date;
     avatarUrl?: string;
 
+    passwordResetAllowed?: boolean;
+    passwordResetExpiresAt?: Date;
     isDeleted: boolean;
     lastLoginAt?: Date;
     createdAt: Date;

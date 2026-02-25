@@ -1,5 +1,5 @@
 import type { PaginationOptions, PaginationResult } from "../types/types";
-import type { QueryFilter, UpdateQuery } from "mongoose";
+import type { mongo, QueryFilter, UpdateQuery } from "mongoose";
 import mongoose, { Model } from "mongoose";
 import { DatabaseError, NotFoundError } from "./errors/AppError";
 import { AppLogger } from "./logging/logger";
@@ -11,17 +11,13 @@ export interface BaseServiceOptions {
     maxPageSize?: number;
 }
 
-export abstract class BaseService<
-    TDocument extends mongoose.Document,
-    TCreateInput = any,
-    TUpdateInput = any
-> {
-    protected model: Model<TDocument>;
+export abstract class BaseService<TSchema> {
+    protected model: Model<TSchema>;
     protected modelName: string;
     protected options: BaseServiceOptions;
 
     constructor(
-        model: Model<TDocument>,
+        model: Model<TSchema>,
         modelName: string,
         options: BaseServiceOptions = {}
     ) {
@@ -38,8 +34,8 @@ export abstract class BaseService<
 
     // ---------------- CREATE ----------------
     protected async create(
-        data: Partial<TDocument>
-    ): Promise<TDocument> {
+        data: Partial<TSchema>
+    ): Promise<TSchema> {
         try {
             const createData = this.options.enableAuditFields
                 ? { ...data, createdAt: new Date(), updatedAt: new Date() }
@@ -53,8 +49,8 @@ export abstract class BaseService<
     }
     // ---------------- FIND ONE ----------------
     protected async findOne(
-        filters: QueryFilter<TDocument>
-    ): Promise<TDocument | null> {
+        filters: QueryFilter<TSchema>
+    ): Promise<TSchema | null> {
         try {
             return await this.model.findOne(
                 this.buildWhereClause(filters)
@@ -65,7 +61,7 @@ export abstract class BaseService<
     }
 
     // ---------------- FIND BY ID ----------------
-    protected async findById(id: string): Promise<TDocument> {
+    protected async findById(id: mongoose.Types.ObjectId | string): Promise<TSchema> {
         try {
             const doc = await this.model.findById(id);
             if (!doc) throw new NotFoundError(`${this.modelName} not found`);
@@ -77,10 +73,10 @@ export abstract class BaseService<
 
     // ---------------- FIND MANY ----------------
     protected async findMany(
-        filters: QueryFilter<TDocument> = {},
+        filters: QueryFilter<TSchema> = {},
         pagination?: Partial<PaginationOptions>,
         sort?: Record<string, 1 | -1>
-    ): Promise<PaginationResult<TDocument>> {
+    ): Promise<PaginationResult<TSchema>> {
         try {
             const where = this.buildWhereClause(filters);
             const finalPagination = this.normalizePagination(pagination);
@@ -107,7 +103,7 @@ export abstract class BaseService<
 
     // ---------------- EXISTS ----------------
     protected async exists(
-        filters: QueryFilter<TDocument>
+        filters: QueryFilter<TSchema>
     ): Promise<boolean> {
         try {
             const count = await this.model.countDocuments(
@@ -121,9 +117,9 @@ export abstract class BaseService<
 
     // ---------------- UPDATE BY ID ----------------
     protected async updateById(
-        id: string,
-        data: mongoose.UpdateQuery<TDocument>
-    ): Promise<TDocument> {
+        id: mongoose.Types.ObjectId,
+        data: mongoose.UpdateQuery<TSchema>
+    ): Promise<TSchema> {
         try {
             const updateData = this.options.enableAuditFields
                 ? { ...data, updatedAt: new Date() }
@@ -217,8 +213,8 @@ export abstract class BaseService<
     }
 
     protected buildWhereClause(
-        filters: QueryFilter<TDocument>
-    ): QueryFilter<TDocument> {
+        filters: QueryFilter<TSchema>
+    ): QueryFilter<TSchema> {
         if (this.options.enableSoftDelete) {
             return { ...filters, deletedAt: null };
         }

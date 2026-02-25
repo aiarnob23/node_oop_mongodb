@@ -48,7 +48,11 @@ const userSchema = new Schema<IUser>(
 
         emailVerifiedAt: Date,
         avatarUrl: String,
-
+        passwordResetAllowed: {
+            type:Boolean,
+            default: false
+        },
+        passwordResetExpiresAt: Date,
         isDeleted: {
             type: Boolean,
             default: false,

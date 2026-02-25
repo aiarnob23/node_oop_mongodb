@@ -4,25 +4,14 @@ import type SESEmailService from "../../services/SESEmailService";
 import crypto from 'crypto';
 import { OTPType, type IOTP } from "./otp.interface";
 import type { Model } from "mongoose";
+import type mongoose from "mongoose";
 
 
-export interface OTPDATA {
-    id: string;
-    identifier: string;
-    code: string;
-    type: OTPType;
-    expiresAt: Date;
-    verified: boolean;
-    attempts: number;
-    createdAt: Date;
-    updatedAt: Date;
-    userId?: string;
-}
 
 export interface SendOTPInput {
     identifier: string;
     type: OTPType;
-    userId?: string;
+    userId?: mongoose.Types.ObjectId;
 }
 
 export interface verifyOTPInput {
