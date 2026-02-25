@@ -38,7 +38,11 @@ export class AuthController extends BaseController {
 
         this.setAuthCookie(res, result.token);
 
-        return this.sendResponse(res, 'Login Successful', HTTPStatusCode.OK, result);
+        return this.sendResponse(
+            res,
+            'Email verified successfully',
+            HTTPStatusCode.OK,
+            result);
     }
 
     /**
