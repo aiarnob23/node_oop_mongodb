@@ -14,7 +14,7 @@ async function bootstrap() {
 
         // Register application modules
         app.registerModule(new AuthModule());
-        
+
         AppLogger.info('✅ All modules registered successfully');
 
         // Start the server
