@@ -1,14 +1,15 @@
-
+import { BadRequestError } from "../../core/errors/AppError";
+import { AppLogger } from "../../core/logging/logger";
+import type SESEmailService from "../../services/SESEmailService";
 import crypto from 'crypto';
-import type SESEmailService from './SESEmailService';
-import cron from 'node-cron';
-import { AppLogger } from '../core/logging/logger';
-import { BadRequestError } from '../core/errors/AppError';
+import { OTPType, type IOTP } from "./otp.interface";
+import type { Model } from "mongoose";
+
 
 export interface OTPDATA {
     id: string;
     identifier: string;
-    code: number;
+    code: string;
     type: OTPType;
     expiresAt: Date;
     verified: boolean;
@@ -16,13 +17,6 @@ export interface OTPDATA {
     createdAt: Date;
     updatedAt: Date;
     userId?: string;
-}
-
-export enum OTPType {
-    email_verification = 'email_verification',
-    login_verification = 'login_verification',
-    password_reset = 'password_reset',
-    two_factor = 'two_factor',
 }
 
 export interface SendOTPInput {
@@ -33,7 +27,7 @@ export interface SendOTPInput {
 
 export interface verifyOTPInput {
     identifier: string;
-    code: number;
+    code: string;
     type: OTPType;
 }
 
@@ -53,25 +47,13 @@ export class OTPService {
     private readonly RATE_LIMIT_WINDOW = 60 * 60 * 1000; //1hr
 
     private emailService: SESEmailService;
+    private model: Model<IOTP>;
 
-    constructor(emailService: SESEmailService) {
+    constructor(model: Model<IOTP>, emailService: SESEmailService) {
         this.emailService = emailService;
-        this.setUpCleanupJob();
+        this.model = model;
     }
 
-    private setUpCleanupJob(): void {
-        cron.schedule('*/20 * * * *', async () => {
-            try {
-                AppLogger.info('Running scheduled OTP cleanup...');
-                const deletedCount = await this.cleanupExpiredOTPs();
-                AppLogger.info('Scheduled OTP cleanupp completed', { deletedCount });
-            } catch (error) {
-                AppLogger.error('Error during scheduled OTP cleanup', {
-                    error: error instanceof Error ? error.message : 'Unknown error',
-                });
-            }
-        })
-    }
 
     // Helper method to extract email string from identifier
     private getEmailFromIdentifier(identifier: string | { email: string }): string {
@@ -100,16 +82,14 @@ export class OTPService {
         const expiresAt = new Date(Date.now() + this.OTP_EXPIARY_MINUTES * 60 * 1000);
 
         //Save OTP to database
-        const otpRecord = await this.prisma.oTP.create({
-            data: {
-                identifier: email,
-                code: code,
-                type: type,
-                expiresAt: expiresAt,
-                verified: false,
-                attempts: 0,
-                userId: userId,
-            },
+        const otpRecord = await this.model.create({
+            identifier: email,
+            code: code,
+            type: type,
+            expiresAt: expiresAt,
+            verified: false,
+            attempts: 0,
+            userId: userId,
         });
 
         //Send OTP via email
@@ -130,8 +110,8 @@ export class OTPService {
             };
         } catch (error) {
             // If email sending fails, delete the OTP record
-            await this.prisma.oTP.delete({
-                where: { id: otpRecord.id },
+            await this.model.deleteOne({
+                _id: otpRecord._id,
             });
             AppLogger.error('Failed to send OTP email', {
                 error: error instanceof Error ? error.message : 'Unknown error',
@@ -152,95 +132,88 @@ export class OTPService {
         const { identifier, code, type } = data;
         const email = this.getEmailFromIdentifier(identifier);
 
-        const numericCode = code;
-        if (isNaN(numericCode) || numericCode < 100000 || numericCode > 999999) {
+        if (!/^\d{6}$/.test(code)) {
             throw new BadRequestError('Invalid OTP format. Please enter a 6-digit code.');
         }
 
-        const otpRecord = await this.prisma.oTP.findFirst({
-            where: { identifier: email, type, verified: false },
-            orderBy: { createdAt: 'desc' }
-        });
+        const otpRecord = await this.model
+            .findOne({
+                identifier: email,
+                type,
+                verified: false,
+            })
+            .sort({ createdAt: -1 });
 
         if (!otpRecord) {
             throw new BadRequestError('Invalid or expired OTP');
         }
 
         if (new Date() > otpRecord.expiresAt) {
-            await this.prisma.oTP.update({
-                where: { id: otpRecord.id },
-                data: { verified: true },
-            });
+            await this.model.deleteOne({ _id: otpRecord._id });
             throw new BadRequestError('OTP has expired. Please request a new one.');
         }
 
         if (otpRecord.attempts >= this.MAX_ATTEMPTS) {
-            await this.prisma.oTP.delete({ where: { id: otpRecord.id } });
+            await this.model.deleteOne({ _id: otpRecord._id });
             throw new BadRequestError(
-                'Maximum verification attemps exceeded. Please request a new OTP.'
+                'Maximum verification attempts exceeded. Please request a new OTP.'
             );
         }
 
-        if (otpRecord.code !== numericCode) {
+        if (otpRecord.code !== code) {
             const newAttempts = otpRecord.attempts + 1;
+
             if (newAttempts >= this.MAX_ATTEMPTS) {
-                await this.prisma.oTP.delete({ where: { id: otpRecord.id } });
-                throw new BadRequestError('OTP has expired. Please request a new one.');
+                await this.model.deleteOne({ _id: otpRecord._id });
+                throw new BadRequestError('OTP expired due to too many attempts.');
             }
 
-            await this.prisma.oTP.update({
-                where: { id: otpRecord.id },
-                data: { attempts: newAttempts },
-            })
-            const attemptsRemaining = this.MAX_ATTEMPTS - newAttempts;
-            throw new BadRequestError(`Invalid OTP code. ${attemptsRemaining} attempts remaining.`);
+            await this.model.updateOne(
+                { _id: otpRecord._id },
+                { $set: { attempts: newAttempts } }
+            );
+
+            throw new BadRequestError(
+                `Invalid OTP code. ${this.MAX_ATTEMPTS - newAttempts} attempts remaining.`
+            );
         }
 
-        //OTP is valid
-        if (type === otpRecord.type && numericCode === otpRecord.code) {
-            await this.prisma.oTP.update({
-                where: { id: otpRecord.id },
-                data: { verified: true },
-            })
-        } else {
-            await this.prisma.oTP.delete({ where: { id: otpRecord.id } });
-        }
+        // Success
+        await this.model.deleteOne({ _id: otpRecord._id });
 
         return {
             success: true,
             message: 'OTP verified successfully',
         };
-
     }
 
     //cleanup expired otps
     async cleanupExpiredOTPs(): Promise<number> {
         const now = new Date();
-        const result = await this.prisma.oTP.deleteMany({
-            where: {
-                OR: [
-                    { expiresAt: { lt: now } },
-                    { createdAt: { lt: new Date(now.getDate() - 24 * 60 * 60 * 1000) } },
-                ],
-            },
+
+        const result = await this.model.deleteMany({
+            $or: [
+                { expiresAt: { $lt: now } },
+                { createdAt: { $lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+            ],
         });
-        return result.count;
+
+        return result.deletedCount || 0;
     }
 
     //chck rate limit
     private async checkRateLimit(identifier: string, type: OTPType): Promise<void> {
         const oneHourAgo = new Date(Date.now() - this.RATE_LIMIT_WINDOW);
-        const recentOTPS = await this.prisma.oTP.count({
-            where: {
-                identifier: identifier,
-                type,
-                createdAt: { gte: oneHourAgo },
-            },
+
+        const count = await this.model.countDocuments({
+            identifier,
+            type,
+            createdAt: { $gte: oneHourAgo },
         });
 
-        if (recentOTPS >= this.MAX_SENDS_PER_HOUR) {
+        if (count >= this.MAX_SENDS_PER_HOUR) {
             throw new BadRequestError(
-                `Too many OTP requests. Please wait an hour before requesting another OTP.`
+                'Too many OTP requests. Please wait an hour before requesting another OTP.'
             );
         }
     }
@@ -248,10 +221,10 @@ export class OTPService {
     //check recent otps
     private async checkRecentOTP(identifier: string, type: OTPType): Promise<void> {
         const cooldownTime = new Date(Date.now() - this.RESEND_COOLDOWN_MINUTES * 60 * 1000);
-        const recentOTP = await this.prisma.oTP.findFirst({
-            where: { identifier: identifier, type, verified: false },
-            orderBy: { createdAt: 'desc' },
-        });
+
+        const recentOTP = await this.model
+            .findOne({ identifier, type, verified: false })
+            .sort({ createdAt: -1 });
 
         if (recentOTP && recentOTP.createdAt > cooldownTime) {
             const waitTime = Math.ceil(
@@ -260,39 +233,35 @@ export class OTPService {
                     Date.now()) /
                 60000
             );
+
             throw new BadRequestError(
-                `Please wait ${waitTime} minute${waitTime > 1 ? 's' : ''
-                } before requesting a new OTP.`
+                `Please wait ${waitTime} minute${waitTime > 1 ? 's' : ''} before requesting a new OTP.`
             );
         }
     }
 
     //cleanup existing otps
     private async cleanupExistingOTPs(identifier: string, type: OTPType): Promise<void> {
-        await this.prisma.oTP.deleteMany({
-            where: { identifier: identifier, type },
-        });
+        await this.model.deleteMany({ identifier, type });
     }
 
     /**
      * Emergency cleanup - delete all OTPs for a specific user (useful for account deletion)
      */
     async cleanupUserOTPs(identifier: string): Promise<number> {
-        const result = await this.prisma.oTP.deleteMany({
-            where: { identifier },
-        });
+        const result = await this.model.deleteMany({ identifier });
 
         AppLogger.info('Cleaned up user OTPs', {
             identifier: this.maskEmail(identifier),
-            deletedCount: result.count,
+            deletedCount: result.deletedCount || 0,
         });
 
-        return result.count;
+        return result.deletedCount || 0;
     }
 
     //generate otp code
-    private generateOTPCode(): number {
-        return crypto.randomInt(100000, 999999);
+    private generateOTPCode(): string {
+        return crypto.randomInt(100000, 999999).toString();
     }
 
     /**
@@ -300,7 +269,7 @@ export class OTPService {
     */
     private async sendOTPEmail(
         email: string,
-        code: number,
+        code: string,
         type: OTPType,
         expiresAt: Date
     ): Promise<void> {
